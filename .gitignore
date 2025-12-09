@@ -1,0 +1,50 @@
+# Python cache / compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code settings
+.vscode/
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# OS system files
+.DS_Store
+Thumbs.db
+
+# spaCy model downloads
+*.whl
+
+# Ignore CSV backups but allow main dataset
+data/*.xlsx
+data/*.json
+# Keep the main POI CSV
+!data/POI_with_region.csv
+
+# Logs
+*.log
+
+# Python packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment variables
+.env
+
+# Ignore large model folders (if added later)
+models/
