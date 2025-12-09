@@ -2,70 +2,96 @@ from app.database import POI_DATA
 from app.prompt_parser import parse_query
 from app.recommender import CATEGORY_MAP
 from app.explain import explain_level, explain_categories, explain_poi
+import numpy as np
 
 
 # ---------------------------------------------------------
-# Helpers for grouping POIs
+# Weighted Sampling Helper
 # ---------------------------------------------------------
 
-def group_by_region(df):
-    """Return a dict of region → list of POIs"""
+def weighted_sample(df, top_k=5):
+    """
+    Select top_k POIs using weighted random sampling.
+    - Higher popularity = higher chance
+    - Still introduces diversity
+    """
+    if len(df) <= top_k:
+        return df.to_dict(orient="records")
+
+    # Convert popularity into probability weights
+    weights = df["popularity"].astype(float).values
+    weights = weights / weights.sum()
+
+    sampled_idx = np.random.choice(
+        df.index,
+        size=top_k,
+        replace=False,
+        p=weights
+    )
+    return df.loc[sampled_idx].to_dict(orient="records")
+
+
+# ---------------------------------------------------------
+# Grouping Helpers
+# ---------------------------------------------------------
+
+def group_by_region(df, top_k=5):
+    """Return region → weighted-sampled POIs"""
     grouped = {}
     for region in sorted(df["region"].unique()):
         sub = df[df["region"] == region]
-        grouped[region] = sub.to_dict(orient="records")
+        grouped[region] = weighted_sample(sub, top_k)
     return grouped
 
 
-def group_by_district(df):
-    """Return a dict of district → list of POIs"""
+def group_by_district(df, top_k=5):
+    """Return district → weighted-sampled POIs"""
     grouped = {}
     for district in sorted(df["district"].unique()):
         sub = df[df["district"] == district]
-        grouped[district] = sub.to_dict(orient="records")
+        grouped[district] = weighted_sample(sub, top_k)
     return grouped
 
 
 # ---------------------------------------------------------
-# Main multi-level recommender
+# MAIN Multi-Level Recommender
 # ---------------------------------------------------------
 
 def multilevel_recommend(query: str, top_k: int = 5):
     """
     Multi-level recommendation engine:
     - Detects location level (city, region, district, POI)
-    - Detects categories (shopping, food, cafes…)
+    - Detects categories
     - Performs fallback if insufficient POIs
-    - Produces explanations for FYP requirements
+    - Produces explainability strings (FYP requirement)
     """
 
     parsed = parse_query(query)
     location = parsed["location"]
     categories = parsed["categories"] or []
 
-    # ------------------------------------------------------------------
-    # Step 1 — Filter POIs by category (or explore mode)
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # Step 1 — Filter POIs by category
+    # -----------------------------------------------------
 
     if categories:
         allowed_categories = []
         for c in categories:
             allowed_categories.extend(CATEGORY_MAP.get(c, []))
-
         df = POI_DATA[POI_DATA["category"].isin(allowed_categories)].copy()
     else:
-        df = POI_DATA.copy()  # exploration mode → use all POIs
+        df = POI_DATA.copy()  # exploration mode
 
-    # Sort by popularity
+    # Sort by popularity (before sampling)
     if "popularity" in df.columns:
         df = df.sort_values(by="popularity", ascending=False)
 
-    # ------------------------------------------------------------------
-    # CASE A: No location detected → city-level recommendations
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE A: No location detected → CITY LEVEL
+    # -----------------------------------------------------
 
     if not location:
-        region_groups = group_by_region(df)
+        region_groups = group_by_region(df, top_k)
 
         return {
             "level": "city",
@@ -82,15 +108,15 @@ def multilevel_recommend(query: str, top_k: int = 5):
             "parsed": parsed
         }
 
-    # ------------------------------------------------------------------
-    # CASE B: Region-level prompt
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE B: REGION LEVEL
+    # -----------------------------------------------------
 
     if location["location_level"] == "region":
         loc_name = location["location_name"].lower()
         region_df = df[df["region"].str.lower() == loc_name]
 
-        district_groups = group_by_district(region_df)
+        district_groups = group_by_district(region_df, top_k)
 
         return {
             "level": "region",
@@ -107,37 +133,37 @@ def multilevel_recommend(query: str, top_k: int = 5):
             "parsed": parsed
         }
 
-    # ------------------------------------------------------------------
-    # CASE C: District-level prompt
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE C: DISTRICT LEVEL
+    # -----------------------------------------------------
 
     if location["location_level"] == "district":
         loc_name = location["location_name"].lower()
         district_df = df[df["district"].str.lower() == loc_name]
 
-        # Fallback: too few POIs → expand to region
+        # Fallback: if insufficient POIs → expand to region
         if len(district_df) < top_k:
             region_name = location["region"]
             region_df = df[df["region"] == region_name]
+            fallback_results = weighted_sample(region_df, top_k)
 
             return {
                 "level": "district_fallback",
                 "district": location["location_name"],
                 "region": region_name,
-                "results": region_df.head(top_k).to_dict(orient="records"),
+                "results": fallback_results,
                 "explanation": {
                     "level_reason": explain_level(parsed, location, "district_fallback"),
                     "category_reason": explain_categories(categories)
                 },
                 "poi_explanations": [
-                    explain_poi(p, location, categories)
-                    for p in region_df.head(top_k).to_dict(orient="records")
+                    explain_poi(p, location, categories) for p in fallback_results
                 ],
                 "parsed": parsed
             }
 
-        # Main district output
-        results = district_df.head(top_k).to_dict(orient="records")
+        # Main District Output (Weighted)
+        results = weighted_sample(district_df, top_k)
 
         return {
             "level": "district",
@@ -153,15 +179,15 @@ def multilevel_recommend(query: str, top_k: int = 5):
             "parsed": parsed
         }
 
-    # ------------------------------------------------------------------
-    # CASE D: POI-level prompt → return nearby POIs in same district
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE D: POI LEVEL → Nearby POIs
+    # -----------------------------------------------------
 
     if location["location_level"] == "poi":
         district_name = location["district"]
         district_df = df[df["district"].str.lower() == district_name.lower()]
 
-        results = district_df.head(top_k).to_dict(orient="records")
+        results = weighted_sample(district_df, top_k)
 
         return {
             "level": "poi",
@@ -177,9 +203,9 @@ def multilevel_recommend(query: str, top_k: int = 5):
             "parsed": parsed
         }
 
-    # ------------------------------------------------------------------
-    # Fallback — should not occur but included for safety
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # FALLBACK (Should Not Occur)
+    # -----------------------------------------------------
 
     return {
         "error": "Unable to determine recommendation level.",
