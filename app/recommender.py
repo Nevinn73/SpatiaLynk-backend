@@ -1,64 +1,84 @@
-from app.database import POI_DATA
-from app.prompt_parser import parse_query
+# app/recommender.py
+import numpy as np
+import pandas as pd
 
-# Map user intent → POI categories in the CSV
+from app.database import POI_DATA
+
+
+# High-level categories → concrete POI categories in your CSV
 CATEGORY_MAP = {
-    "shopping": ["shopping_mall"],
-    "food": ["food", "restaurant", "hawker"],
-    "budget_food": ["hawker"],
+    "food": ["restaurant", "hawker", "food"],
     "cafe": ["cafe"],
-    "family": ["family_activity"],   # adjust if CSV uses different labels
-    "outdoors": ["park"],
-    "culture": ["museum", "gallery"],
-    "supermarket": ["supermarket"]
+    "shopping": ["shopping_mall", "mall", "shopping"],
+    "fun": ["attraction", "theme_park", "playground", "arcade", "bowling", "cinema",
+            "restaurant", "cafe"],  # fun can include food
+    "outdoors": ["park", "garden", "nature"],
+    "culture": ["museum", "gallery", "temple", "heritage"],
+}
+
+# Categories we almost never want to show for fun / broad searches
+BORING_CATEGORIES = {
+    "atm",
+    "bank",
+    "supermarket",
+    "convenience_store",
+    "clinic",
+    "medical",
+    "pharmacy",
+    "office",
 }
 
 
-def recommend_places(query: str, top_k: int = 5):
-    parsed = parse_query(query)
+def weighted_sample(data, top_k: int = 5):
+    """
+    Safe sampler:
+    - Accepts DataFrame OR list of dict
+    - Returns list[dict]
+    """
+    if isinstance(data, list):
+        if len(data) == 0:
+            return []
+        df = pd.DataFrame(data)
+    else:
+        df = data.copy()
 
-    location = parsed["location"]
-    categories = parsed["categories"]
+    if len(df) == 0:
+        return []
 
-    if not location:
-        return {"error": "Could not detect location."}
+    if "popularity" not in df.columns:
+        return df.head(top_k).to_dict(orient="records")
+
+    if len(df) <= top_k:
+        return df.to_dict(orient="records")
+
+    weights = df["popularity"].astype(float).values
+    weights = weights / weights.sum()
+
+    idx = np.random.choice(df.index, size=top_k, replace=False, p=weights)
+    return df.loc[idx].to_dict(orient="records")
+
+
+def apply_intent_filter(df: pd.DataFrame, categories: list | None) -> pd.DataFrame:
+    """
+    - If categories is None → broad exploration:
+        - Drop boring categories, keep everything else (including restaurants).
+    - If categories include high-level labels (food, shopping, etc.):
+        - Keep POIs whose categories map to those, AND still drop boring ones.
+    """
+    df = df.copy()
+
+    # Always remove boring stuff unless explicitly desired in future
+    df = df[~df["category"].str.lower().isin(BORING_CATEGORIES)]
 
     if not categories:
-        return {"error": "Could not detect category or intent."}
+        return df
 
-    district = location["location_name"]
-    location_level = location["location_level"]
-
-    # Step 1: Filter by location district
-    df = POI_DATA.copy()
-
-    if location_level == "district":
-        df = df[df["district"].str.lower() == district.lower()]
-    elif location_level == "region":
-        df = df[df["region"].str.lower() == district.lower()]
-    # If POI level → just return the POI itself
-    elif location_level == "poi":
-        return {"results": [location]}
-
-    # Step 2: Filter by category mapping
-    allowed_categories = []
+    allowed = set()
     for cat in categories:
-        allowed_categories.extend(CATEGORY_MAP.get(cat, []))
+        allowed.update(CATEGORY_MAP.get(cat, []))
 
-    df = df[df["category"].isin(allowed_categories)]
+    if not allowed:
+        return df
 
-    # Step 3: Rank by popularity (simple baseline)
-    df = df.sort_values(by="popularity", ascending=False)
-
-    # Step 4: Return results
-    results = df.head(top_k).to_dict(orient="records")
-
-    return {
-    "parsed": {
-        "raw_query": query,
-        "location": parsed["location"],
-        "categories": categories
-    },
-    "results": results
-}
-
+    df = df[df["category"].isin(list(allowed))]
+    return df

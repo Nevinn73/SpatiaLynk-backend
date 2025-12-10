@@ -1,31 +1,26 @@
-import spacy
+# app/prompt_parser.py
+import re
 from app.database import POI_DATA
 
-# Load NLP model safely
-try:
-    nlp = spacy.load("en_core_web_sm")
-except Exception as e:
-    print("Error loading spaCy model:", e)
-    nlp = None
 
+# ------------------------------------------------------------
+# CATEGORY DETECTION
+# ------------------------------------------------------------
 
-# Keyword → Category Map
 CATEGORY_KEYWORDS = {
-    # Shopping
-    "shop": "shopping",
-    "shopping": "shopping",
-    "mall": "shopping",
-    "malls": "shopping",
-    "retail": "shopping",
-
-    # Food
+    # Food / eating
     "food": "food",
+    "eat": "food",
+    "eats": "food",
+    "dine": "food",
+    "dining": "food",
     "restaurant": "food",
     "restaurants": "food",
-    "eat": "food",
-    "hawker": "budget_food",
-    "cheap food": "budget_food",
-    "affordable food": "budget_food",
+    "lunch": "food",
+    "dinner": "food",
+    "breakfast": "food",
+    "supper": "food",
+    "bbq": "food",
 
     # Cafes
     "cafe": "cafe",
@@ -33,38 +28,92 @@ CATEGORY_KEYWORDS = {
     "coffee": "cafe",
     "brunch": "cafe",
 
-    # Family
-    "family": "family",
-    "kids": "family",
-    "child": "family",
-    "child-friendly": "family",
-    "family-friendly": "family",
+    # Shopping / fashion
+    "shop": "shopping",
+    "shopping": "shopping",
+    "mall": "shopping",
+    "malls": "shopping",
+    "clothes": "shopping",
+    "fashion": "shopping",
+    "boutique": "shopping",
+    "retail": "shopping",
 
-    # Outdoors
+    # Fun / “things to do” / entertainment
+    "fun": "fun",
+    "activities": "fun",
+    "activity": "fun",
+    "entertainment": "fun",
+    "attraction": "fun",
+    "attractions": "fun",
+    "play": "fun",
+    "hang out": "fun",
+    "hangout": "fun",
+
+    # Outdoors / nature
     "park": "outdoors",
+    "parks": "outdoors",
     "hiking": "outdoors",
+    "trail": "outdoors",
     "nature": "outdoors",
 
     # Culture
     "museum": "culture",
     "museums": "culture",
     "gallery": "culture",
+    "galleries": "culture",
     "art": "culture",
-
-    # Groceries
-    "supermarket": "supermarket",
-    "supermarkets": "supermarket",
-    "grocery": "supermarket",
-    "groceries": "supermarket"
 }
 
 
+def extract_category(query: str):
+    q = query.lower()
+    found = set()
+
+    # Multi-word phrases first
+    if "things to do" in q or "what to do" in q or "where to go" in q:
+        # Broad exploration – we treat it as fun, but we
+        # will still allow restaurants, cafes etc. later
+        found.add("fun")
+
+    for phrase, category in CATEGORY_KEYWORDS.items():
+        if phrase in q:
+            found.add(category)
+
+    if not found:
+        return None
+
+    return list(found)
+
+
+# ------------------------------------------------------------
+# LOCATION DETECTION
+# ------------------------------------------------------------
+
 def extract_location(query: str):
     q = query.lower()
+
+    # SPECIAL: “Singapore” = city level
+    if "singapore" in q or "sg " in q or q.strip() == "sg":
+        return {
+            "location_name": "Singapore",
+            "location_level": "city"
+        }
+
+    # FUZZY DISTRICT FALLBACK (handles “Jurong”, “Hougang area”, etc.)
+    for district_name in POI_DATA["district"].unique():
+        base_token = district_name.split()[0].lower()  # e.g. "jurong" from "JURONG EAST"
+        if base_token in q:
+            region = POI_DATA[POI_DATA["district"] == district_name]["region"].iloc[0]
+            return {
+                "location_name": district_name,
+                "location_level": "district",
+                "region": region
+            }
+
     matches = []
 
     for _, row in POI_DATA.iterrows():
-
+        # POI name
         if row["name_lower"] in q:
             matches.append({
                 "location_name": row["name"],
@@ -75,6 +124,7 @@ def extract_location(query: str):
                 "region": row["region"]
             })
 
+        # District
         if row["district_lower"] in q:
             matches.append({
                 "location_name": row["district"],
@@ -82,6 +132,7 @@ def extract_location(query: str):
                 "region": row["region"]
             })
 
+        # Region
         if row["region_lower"] in q:
             matches.append({
                 "location_name": row["region"],
@@ -93,30 +144,16 @@ def extract_location(query: str):
 
     priority = {"poi": 3, "district": 2, "region": 1}
     matches.sort(key=lambda x: priority[x["location_level"]], reverse=True)
-
     return matches[0]
 
 
-def extract_category(query: str):
-    q = query.lower()
-    found = set()
-
-    for phrase, cat in CATEGORY_KEYWORDS.items():
-        if phrase in q:
-            found.add(cat)
-
-    if not found:
-        return None
-
-    return list(found)
-
+# ------------------------------------------------------------
+# MASTER PARSER
+# ------------------------------------------------------------
 
 def parse_query(query: str):
-    location = extract_location(query)
-    categories = extract_category(query)
-
     return {
         "raw_query": query,
-        "location": location,
-        "categories": categories
+        "location": extract_location(query),
+        "categories": extract_category(query),
     }
