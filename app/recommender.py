@@ -1,84 +1,113 @@
-# app/recommender.py
+"""
+recommender.py
+
+Category mapping + helper functions for sampling & filtering.
+"""
+
+from __future__ import annotations
+
+from typing import List, Dict, Any
+
 import numpy as np
 import pandas as pd
 
 from app.database import POI_DATA
 
+# -------------------------------------------------------------------
+# Map abstract categories → actual POI category labels
+# -------------------------------------------------------------------
+CATEGORY_MAP: Dict[str, List[str]] = {
+    # Food & drink
+    "food": ["restaurant", "hawker", "eatery", "bistro"],
+    "cafe": ["cafe", "coffee", "dessert_cafe", "tea_house"],
 
-# High-level categories → concrete POI categories in your CSV
-CATEGORY_MAP = {
-    "food": ["restaurant", "hawker", "food"],
-    "cafe": ["cafe"],
-    "shopping": ["shopping_mall", "mall", "shopping"],
-    "fun": ["attraction", "theme_park", "playground", "arcade", "bowling", "cinema",
-            "restaurant", "cafe"],  # fun can include food
-    "outdoors": ["park", "garden", "nature"],
+    # Shopping
+    "shopping": ["shopping_mall", "market", "boutique"],
+
+    # Nature / outdoors
+    "nature": ["park", "garden", "nature_reserve", "zoo", "beach"],
+
+    # Culture & heritage
     "culture": ["museum", "gallery", "temple", "heritage"],
+
+    # Fun / activities
+    "activities": [
+        "activity_center",
+        "sports_center",
+        "arcade",
+        "escape_room",
+        "axe_throwing",
+        "indoor_playground",
+        "theme_park",
+        "attraction",
+    ],
+
+    # Nightlife
+    "nightlife": ["bar", "club", "lounge"],
 }
 
-# Categories we almost never want to show for fun / broad searches
+# Categories that we *never* want to recommend for this app
 BORING_CATEGORIES = {
-    "atm",
-    "bank",
     "supermarket",
-    "convenience_store",
+    "grocery",
+    "atm",
+    "convenience",
     "clinic",
-    "medical",
-    "pharmacy",
+    "bank",
     "office",
+    "service",
+    "pharmacy",
 }
 
 
-def weighted_sample(data, top_k: int = 5):
+def filter_exploration_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Safe sampler:
-    - Accepts DataFrame OR list of dict
-    - Returns list[dict]
+    Used when the user gives a broad query (no specific category):
+    - Start from all POIs
+    - Remove 'boring' categories
     """
-    if isinstance(data, list):
-        if len(data) == 0:
-            return []
-        df = pd.DataFrame(data)
-    else:
-        df = data.copy()
+    if "category" not in df.columns:
+        return df
+    return df[~df["category"].isin(BORING_CATEGORIES)].copy()
 
-    if len(df) == 0:
+
+def diversified_sample(df: pd.DataFrame, top_k: int = 5) -> List[Dict[str, Any]]:
+    """
+    Weighted random sampling while encouraging variety by category.
+
+    - If df has <= top_k rows → return all
+    - Otherwise:
+        * Prefer unique categories first
+        * Use 'popularity' as weight if present
+    """
+    if df.empty:
         return []
-
-    if "popularity" not in df.columns:
-        return df.head(top_k).to_dict(orient="records")
 
     if len(df) <= top_k:
         return df.to_dict(orient="records")
 
-    weights = df["popularity"].astype(float).values
-    weights = weights / weights.sum()
-
-    idx = np.random.choice(df.index, size=top_k, replace=False, p=weights)
-    return df.loc[idx].to_dict(orient="records")
-
-
-def apply_intent_filter(df: pd.DataFrame, categories: list | None) -> pd.DataFrame:
-    """
-    - If categories is None → broad exploration:
-        - Drop boring categories, keep everything else (including restaurants).
-    - If categories include high-level labels (food, shopping, etc.):
-        - Keep POIs whose categories map to those, AND still drop boring ones.
-    """
     df = df.copy()
 
-    # Always remove boring stuff unless explicitly desired in future
-    df = df[~df["category"].str.lower().isin(BORING_CATEGORIES)]
+    # Ensure popularity column exists and is numeric
+    if "popularity" not in df.columns:
+        df["popularity"] = 1.0
 
-    if not categories:
-        return df
+    df["popularity"] = pd.to_numeric(df["popularity"], errors="coerce").fillna(1.0)
 
-    allowed = set()
-    for cat in categories:
-        allowed.update(CATEGORY_MAP.get(cat, []))
+    results: List[Dict[str, Any]] = []
+    used_categories = set()
 
-    if not allowed:
-        return df
+    for _ in range(top_k):
+        remaining = df[~df["category"].isin(used_categories)]
+        if remaining.empty:
+            remaining = df
 
-    df = df[df["category"].isin(list(allowed))]
-    return df
+        weights = remaining["popularity"].astype(float).values
+        weights = weights / weights.sum()
+
+        idx = np.random.choice(remaining.index, p=weights)
+        row = remaining.loc[idx]
+        results.append(row.to_dict())
+        used_categories.add(row["category"])
+
+    return results
